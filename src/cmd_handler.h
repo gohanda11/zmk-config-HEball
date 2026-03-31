@@ -11,7 +11,13 @@
 #define HEBALL_STATUS_OK        0x00
 #define HEBALL_STATUS_ERROR     0xFF
 #define HEBALL_PROTOCOL_VERSION 1
-#define HEBALL_MAX_FRAME_LEN    512
+/*
+ * Maximum frame length in bytes.
+ * On-wire LEN field is uint8_t (max 255), so the largest possible frame is:
+ *   START(1) + LEN(1) + body(255) + CRC(1) = 258 bytes.
+ * Max payload in a response = 253 (LEN encodes CMD_ID + STATUS + PAYLOAD).
+ */
+#define HEBALL_MAX_FRAME_LEN    258
 #define HEBALL_FRAME_TIMEOUT_MS 100
 #define HEBALL_MAX_KEYS         32
 

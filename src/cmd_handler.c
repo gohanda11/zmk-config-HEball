@@ -82,6 +82,7 @@ static uint8_t tx_frame[HEBALL_MAX_FRAME_LEN];
 /* -----------------------------------------------------------------------
  * Streaming state
  * ----------------------------------------------------------------------- */
+static volatile bool rx_overflow;
 static bool streaming_active;
 static uint32_t stream_interval_ms = 50;
 static struct k_work_delayable stream_work;
@@ -114,7 +115,7 @@ static void send_response(uint8_t cmd_id, uint8_t status,
                           const uint8_t *payload, uint8_t payload_len) {
     /* Frame: [0xAB][LEN][CMD_ID][STATUS][PAYLOAD...][CRC8] */
     uint8_t body_len = 2 + payload_len;
-    uint16_t total_len = 3 + payload_len + 1; /* START + LEN + CMD + STATUS + payload + CRC */
+    uint16_t total_len = 5 + payload_len; /* START + LEN + CMD + STATUS + payload + CRC */
 
     tx_frame[0] = HEBALL_FRAME_START;
     tx_frame[1] = body_len;
@@ -202,13 +203,18 @@ static void dispatch_command(uint8_t cmd_id, const uint8_t *payload, uint8_t pay
         uint8_t start = payload[1];
         uint8_t count = payload[2];
         if (payload_len < 3 + count * 2) { send_error(cmd_id); break; }
+        bool had_error = false;
         for (uint8_t i = 0; i < count; i++) {
             uint8_t press   = payload[3 + i * 2];
             uint8_t release = payload[3 + i * 2 + 1];
             int ret = zmk_kscan_he_set_threshold(kscan_dev, start + i, press, release);
-            if (ret < 0) { send_error(cmd_id); break; }
+            if (ret < 0) { had_error = true; break; }
         }
-        send_ok(cmd_id, NULL, 0);
+        if (had_error) {
+            send_error(cmd_id);
+        } else {
+            send_ok(cmd_id, NULL, 0);
+        }
         break;
     }
 
@@ -340,6 +346,11 @@ static struct k_work rx_process_work;
 static void rx_process_work_handler(struct k_work *work) {
     uint8_t byte;
 
+    if (rx_overflow) {
+        rx_overflow = false;
+        LOG_WRN("RX ring buffer overflow — bytes were dropped");
+    }
+
     while (ring_buf_get(&rx_ring_buf, &byte, 1) == 1) {
         int64_t now = k_uptime_get();
 
@@ -411,7 +422,10 @@ static void uart_rx_isr(const struct device *dev, void *user_data) {
     uint8_t buf[32];
     int count;
     while ((count = uart_fifo_read(dev, buf, sizeof(buf))) > 0) {
-        ring_buf_put(&rx_ring_buf, buf, count);
+        int written = ring_buf_put(&rx_ring_buf, buf, count);
+        if (written < count) {
+            rx_overflow = true;
+        }
     }
     k_work_submit(&rx_process_work);
 }
