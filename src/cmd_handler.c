@@ -6,6 +6,10 @@
 #include "cmd_handler.h"
 #include <zmk_kscan_he_api.h>
 
+#ifdef CONFIG_HEBALL_BLE_CENTRAL
+#include "heball_ble_central.h"
+#endif
+
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -87,6 +91,9 @@ static bool streaming_active;
 static uint32_t stream_interval_ms = 50;
 static struct k_work_delayable stream_work;
 
+/* BLE response buffer size for left-half proxy */
+#define RESPONSE_BUF_SIZE_CMD 256
+
 /* -----------------------------------------------------------------------
  * Frame parser state machine
  * ----------------------------------------------------------------------- */
@@ -150,10 +157,67 @@ static void dispatch_command(uint8_t cmd_id, const uint8_t *payload, uint8_t pay
 
     uint8_t half = (payload_len > 0) ? payload[0] : HEBALL_HALF_RIGHT;
 
-    /* Left half not supported yet (Phase 4) */
+    /* Forward left-half commands over BLE (Phase 4) */
     if (half == HEBALL_HALF_LEFT) {
+#ifdef CONFIG_HEBALL_BLE_CENTRAL
+        if (!heball_ble_central_is_connected()) {
+            LOG_WRN("Left half BLE not connected");
+            send_error(cmd_id);
+            return;
+        }
+
+        /*
+         * Build BLE payload: [CMD_ID][payload_after_half_byte...]
+         * Strip the half byte (payload[0]) before forwarding.
+         */
+        uint8_t ble_buf[HEBALL_MAX_FRAME_LEN];
+        ble_buf[0] = cmd_id;
+        uint8_t fwd_len = 1;
+        if (payload_len > 1) {
+            memcpy(&ble_buf[1], &payload[1], payload_len - 1);
+            fwd_len += payload_len - 1;
+        }
+
+        int err = heball_ble_central_write_cmd(ble_buf, fwd_len);
+        if (err) {
+            LOG_ERR("BLE write to left half failed (err %d)", err);
+            send_error(cmd_id);
+            return;
+        }
+
+        /*
+         * Wait for the response via BLE notification (thresh-read char).
+         * Poll with a timeout — recalibrate may take up to 500 ms.
+         */
+        int64_t deadline = k_uptime_get() + 2000;
+        while (!heball_ble_central_response_ready()) {
+            if (k_uptime_get() > deadline) {
+                LOG_WRN("BLE response timeout from left half");
+                send_error(cmd_id);
+                return;
+            }
+            k_sleep(K_MSEC(5));
+        }
+
+        /* Response format from peripheral: [CMD_ID][STATUS][payload...] */
+        uint8_t resp_buf[RESPONSE_BUF_SIZE_CMD];
+        int resp_len = heball_ble_central_get_response(resp_buf, sizeof(resp_buf));
+        if (resp_len < 2) {
+            send_error(cmd_id);
+            return;
+        }
+
+        uint8_t resp_status = resp_buf[1];
+        if (resp_len > 2) {
+            send_response(cmd_id, resp_status, &resp_buf[2], (uint8_t)(resp_len - 2));
+        } else {
+            send_response(cmd_id, resp_status, NULL, 0);
+        }
+        return;
+#else
         send_error(cmd_id);
         return;
+#endif /* CONFIG_HEBALL_BLE_CENTRAL */
     }
 
     uint8_t num_keys = 0;
@@ -431,6 +495,35 @@ static void uart_rx_isr(const struct device *dev, void *user_data) {
 }
 
 /* -----------------------------------------------------------------------
+ * BLE ADC forwarding — left-half ADC data received via BLE → USB
+ * ----------------------------------------------------------------------- */
+#ifdef CONFIG_HEBALL_BLE_CENTRAL
+static void ble_adc_forward_cb(const uint8_t *data, uint16_t len)
+{
+    if (len < 2) {
+        return;
+    }
+
+    /*
+     * Data from peripheral: [CMD_STREAM_ADC_DATA][key_idx, adc_lo, adc_hi, dist] × N
+     * Forward as a standard framed response over USB.
+     */
+    uint8_t body_len = (uint8_t)len;
+    uint16_t total_len = 2 + body_len + 1; /* START + LEN + body + CRC */
+
+    if (total_len > HEBALL_MAX_FRAME_LEN) {
+        return;
+    }
+
+    tx_frame[0] = HEBALL_FRAME_START;
+    tx_frame[1] = body_len;
+    memcpy(&tx_frame[2], data, len);
+    tx_frame[2 + len] = crc8_compute(&tx_frame[1], body_len + 1);
+    uart_send(tx_frame, total_len);
+}
+#endif /* CONFIG_HEBALL_BLE_CENTRAL */
+
+/* -----------------------------------------------------------------------
  * Initialization
  * ----------------------------------------------------------------------- */
 int cmd_handler_init(void) {
@@ -446,6 +539,10 @@ int cmd_handler_init(void) {
 
     uart_irq_callback_user_data_set(data_uart, uart_rx_isr, NULL);
     uart_irq_rx_enable(data_uart);
+
+#ifdef CONFIG_HEBALL_BLE_CENTRAL
+    heball_ble_central_set_adc_callback(ble_adc_forward_cb);
+#endif
 
     LOG_INF("HEball cmd handler initialized");
     return 0;

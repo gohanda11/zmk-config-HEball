@@ -7,3 +7,19 @@ config HEBALL_CMD_HANDLER
       Allows runtime configuration of Hall Effect key thresholds.
       Only available on the right half (requires DT_ALIAS heball_data_uart
       from the heball_right shield overlay).
+
+config HEBALL_BLE_PERIPHERAL
+    bool "HEball BLE GATT peripheral (left half)"
+    default n
+    depends on BT_PERIPHERAL && BT_SMP
+    help
+      Enable custom GATT service for threshold configuration on the left half.
+      Exposes threshold read/write and ADC streaming characteristics over BLE.
+
+config HEBALL_BLE_CENTRAL
+    bool "HEball BLE GATT central (right half)"
+    default n
+    depends on BT_CENTRAL && BT_GATT_CLIENT && BT_SMP
+    help
+      Enable GATT client for proxying configuration commands to the left half
+      over BLE. Discovers the custom HEBALL GATT service on the split peer.
