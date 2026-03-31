@@ -4,7 +4,7 @@
  */
 
 #include "cmd_handler.h"
-#include "zmk_kscan_he_api.h"
+#include <zmk_kscan_he_api.h>
 
 #ifdef CONFIG_HEBALL_BLE_CENTRAL
 #include "heball_ble_central.h"

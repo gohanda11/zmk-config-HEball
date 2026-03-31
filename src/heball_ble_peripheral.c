@@ -10,7 +10,7 @@
 
 #include "heball_ble_peripheral.h"
 #include "cmd_handler.h"
-#include "zmk_kscan_he_api.h"
+#include <zmk_kscan_he_api.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
