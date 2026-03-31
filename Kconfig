@@ -1,0 +1,7 @@
+config HEBALL_CMD_HANDLER
+    bool "HEball binary command handler over CDC ACM"
+    default n
+    depends on USB_CDC_ACM
+    help
+      Enables a binary command protocol over a second CDC ACM USB serial port.
+      Allows runtime configuration of Hall Effect key thresholds.

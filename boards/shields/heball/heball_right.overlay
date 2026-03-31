@@ -164,6 +164,7 @@
         led-red = &led_red;
         led-green = &led_green;
         led-blue = &led_blue;
+        heball-data-uart = &cdc_acm_uart1;
     };
 
     /* XIAO nRF52840 User LEDs are active-low */
@@ -233,6 +234,13 @@
 
 &zephyr_udc0 {
     cdc_acm_uart: cdc_acm_uart {
+        compatible = "zephyr,cdc-acm-uart";
+    };
+};
+
+/* Second CDC ACM for configuration data (HEball Config port) */
+&zephyr_udc0 {
+    cdc_acm_uart1: cdc_acm_uart1 {
         compatible = "zephyr,cdc-acm-uart";
     };
 };

@@ -1,4 +1,5 @@
 *.log
 *.txt
+!CMakeLists.txt
 .claude/
 sch/
