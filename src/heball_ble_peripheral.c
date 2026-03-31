@@ -426,4 +426,4 @@ static int heball_ble_peripheral_init(void)
     return 0;
 }
 
-SYS_INIT(heball_ble_peripheral_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY + 2);
+SYS_INIT(heball_ble_peripheral_init, APPLICATION, 91);

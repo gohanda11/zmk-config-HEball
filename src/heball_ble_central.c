@@ -527,4 +527,4 @@ static int heball_ble_central_init(void)
     return 0;
 }
 
-SYS_INIT(heball_ble_central_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY + 2);
+SYS_INIT(heball_ble_central_init, APPLICATION, 91);

@@ -585,4 +585,4 @@ int cmd_handler_init(void) {
     return 0;
 }
 
-SYS_INIT(cmd_handler_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY + 1);
+SYS_INIT(cmd_handler_init, APPLICATION, 90);
