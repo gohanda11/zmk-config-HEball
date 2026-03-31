@@ -94,6 +94,21 @@ static struct k_work_delayable stream_work;
 /* BLE response buffer size for left-half proxy */
 #define RESPONSE_BUF_SIZE_CMD 256
 
+#ifdef CONFIG_HEBALL_BLE_CENTRAL
+/* BLE proxy thread -- dedicated thread for blocking BLE send/wait (Bug 5 fix) */
+struct ble_proxy_msg {
+    uint8_t cmd_id;
+    uint8_t data[256];
+    uint16_t data_len;
+};
+
+K_MSGQ_DEFINE(ble_cmd_queue, sizeof(struct ble_proxy_msg), 4, 4);
+
+#define BLE_PROXY_STACK_SIZE 1536
+K_THREAD_STACK_DEFINE(ble_proxy_stack, BLE_PROXY_STACK_SIZE);
+static struct k_thread ble_proxy_thread_data;
+#endif /* CONFIG_HEBALL_BLE_CENTRAL */
+
 /* -----------------------------------------------------------------------
  * Frame parser state machine
  * ----------------------------------------------------------------------- */
@@ -167,51 +182,22 @@ static void dispatch_command(uint8_t cmd_id, const uint8_t *payload, uint8_t pay
         }
 
         /*
-         * Build BLE payload: [CMD_ID][payload_after_half_byte...]
+         * Bug 5 fix: submit to BLE proxy thread instead of blocking
+         * the system workqueue. Build BLE payload: [CMD_ID][payload...]
          * Strip the half byte (payload[0]) before forwarding.
          */
-        uint8_t ble_buf[HEBALL_MAX_FRAME_LEN];
-        ble_buf[0] = cmd_id;
-        uint8_t fwd_len = 1;
+        struct ble_proxy_msg msg;
+        msg.cmd_id = cmd_id;
+        msg.data[0] = cmd_id;
+        msg.data_len = 1;
         if (payload_len > 1) {
-            memcpy(&ble_buf[1], &payload[1], payload_len - 1);
-            fwd_len += payload_len - 1;
+            memcpy(&msg.data[1], &payload[1], payload_len - 1);
+            msg.data_len += payload_len - 1;
         }
 
-        int err = heball_ble_central_write_cmd(ble_buf, fwd_len);
-        if (err) {
-            LOG_ERR("BLE write to left half failed (err %d)", err);
+        if (k_msgq_put(&ble_cmd_queue, &msg, K_NO_WAIT)) {
+            LOG_WRN("BLE proxy queue full");
             send_error(cmd_id);
-            return;
-        }
-
-        /*
-         * Wait for the response via BLE notification (thresh-read char).
-         * Poll with a timeout — recalibrate may take up to 500 ms.
-         */
-        int64_t deadline = k_uptime_get() + 2000;
-        while (!heball_ble_central_response_ready()) {
-            if (k_uptime_get() > deadline) {
-                LOG_WRN("BLE response timeout from left half");
-                send_error(cmd_id);
-                return;
-            }
-            k_sleep(K_MSEC(5));
-        }
-
-        /* Response format from peripheral: [CMD_ID][STATUS][payload...] */
-        uint8_t resp_buf[RESPONSE_BUF_SIZE_CMD];
-        int resp_len = heball_ble_central_get_response(resp_buf, sizeof(resp_buf));
-        if (resp_len < 2) {
-            send_error(cmd_id);
-            return;
-        }
-
-        uint8_t resp_status = resp_buf[1];
-        if (resp_len > 2) {
-            send_response(cmd_id, resp_status, &resp_buf[2], (uint8_t)(resp_len - 2));
-        } else {
-            send_response(cmd_id, resp_status, NULL, 0);
         }
         return;
 #else
@@ -498,6 +484,9 @@ static void uart_rx_isr(const struct device *dev, void *user_data) {
  * BLE ADC forwarding — left-half ADC data received via BLE → USB
  * ----------------------------------------------------------------------- */
 #ifdef CONFIG_HEBALL_BLE_CENTRAL
+/* Dedicated TX buffer for ADC forwarding (Bug 6 fix: separate from tx_frame) */
+static uint8_t adc_tx_frame[HEBALL_MAX_FRAME_LEN];
+
 static void ble_adc_forward_cb(const uint8_t *data, uint16_t len)
 {
     if (len < 2) {
@@ -505,7 +494,7 @@ static void ble_adc_forward_cb(const uint8_t *data, uint16_t len)
     }
 
     /*
-     * Data from peripheral: [CMD_STREAM_ADC_DATA][key_idx, adc_lo, adc_hi, dist] × N
+     * Data from peripheral: [CMD_STREAM_ADC_DATA][key_idx, adc_lo, adc_hi, dist] x N
      * Forward as a standard framed response over USB.
      */
     uint8_t body_len = (uint8_t)len;
@@ -515,11 +504,54 @@ static void ble_adc_forward_cb(const uint8_t *data, uint16_t len)
         return;
     }
 
-    tx_frame[0] = HEBALL_FRAME_START;
-    tx_frame[1] = body_len;
-    memcpy(&tx_frame[2], data, len);
-    tx_frame[2 + len] = crc8_compute(&tx_frame[1], body_len + 1);
-    uart_send(tx_frame, total_len);
+    adc_tx_frame[0] = HEBALL_FRAME_START;
+    adc_tx_frame[1] = body_len;
+    memcpy(&adc_tx_frame[2], data, len);
+    adc_tx_frame[2 + len] = crc8_compute(&adc_tx_frame[1], body_len + 1);
+    uart_send(adc_tx_frame, total_len);
+}
+
+/* BLE proxy thread function (Bug 5 fix) */
+static void ble_proxy_work_fn(void *p1, void *p2, void *p3)
+{
+    struct ble_proxy_msg msg;
+    uint8_t resp_buf[RESPONSE_BUF_SIZE_CMD];
+    uint8_t proxy_tx_frame[HEBALL_MAX_FRAME_LEN];
+
+    while (1) {
+        k_msgq_get(&ble_cmd_queue, &msg, K_FOREVER);
+
+        int resp_len = heball_ble_central_send_and_wait(
+            msg.data, msg.data_len, resp_buf, sizeof(resp_buf), 2000);
+
+        if (resp_len < 2) {
+            /* Error or timeout -- send error frame */
+            uint8_t body_len = 2;
+            proxy_tx_frame[0] = HEBALL_FRAME_START;
+            proxy_tx_frame[1] = body_len;
+            proxy_tx_frame[2] = msg.cmd_id;
+            proxy_tx_frame[3] = HEBALL_STATUS_ERROR;
+            proxy_tx_frame[4] = crc8_compute(&proxy_tx_frame[1], body_len + 1);
+            uart_send(proxy_tx_frame, 5);
+        } else {
+            /* Forward response from left half */
+            uint8_t resp_status = resp_buf[1];
+            uint8_t payload_len = (uint8_t)(resp_len - 2);
+            uint8_t body_len = 2 + payload_len;
+            uint16_t total_len = 2 + body_len + 1;
+
+            proxy_tx_frame[0] = HEBALL_FRAME_START;
+            proxy_tx_frame[1] = body_len;
+            proxy_tx_frame[2] = msg.cmd_id;
+            proxy_tx_frame[3] = resp_status;
+            if (payload_len > 0) {
+                memcpy(&proxy_tx_frame[4], &resp_buf[2], payload_len);
+            }
+            proxy_tx_frame[4 + payload_len] =
+                crc8_compute(&proxy_tx_frame[1], body_len + 1);
+            uart_send(proxy_tx_frame, total_len);
+        }
+    }
 }
 #endif /* CONFIG_HEBALL_BLE_CENTRAL */
 
@@ -542,6 +574,11 @@ int cmd_handler_init(void) {
 
 #ifdef CONFIG_HEBALL_BLE_CENTRAL
     heball_ble_central_set_adc_callback(ble_adc_forward_cb);
+    k_thread_create(&ble_proxy_thread_data, ble_proxy_stack,
+                    K_THREAD_STACK_SIZEOF(ble_proxy_stack),
+                    ble_proxy_work_fn, NULL, NULL, NULL,
+                    K_PRIO_COOP(7), 0, K_NO_WAIT);
+    k_thread_name_set(&ble_proxy_thread_data, "ble_proxy");
 #endif
 
     LOG_INF("HEball cmd handler initialized");

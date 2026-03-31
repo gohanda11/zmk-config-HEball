@@ -1,6 +1,6 @@
 /*
  * SPDX-License-Identifier: MIT
- * HEball BLE GATT central — right-half client implementation.
+ * HEball BLE GATT central -- right-half client implementation.
  *
  * Discovers the custom HEBALL GATT service on the left half (BLE peripheral),
  * subscribes to thresh-read and ADC notifications, and provides an API for
@@ -21,11 +21,6 @@
 #include <string.h>
 
 LOG_MODULE_REGISTER(heball_ble_central, CONFIG_ZMK_LOG_LEVEL);
-
-/* ZMK split BLE service UUID — used to confirm the peer is our left half */
-#define ZMK_BT_SPLIT_UUID(num) \
-    BT_UUID_128_ENCODE(num, 0x0096, 0x7107, 0xc967, 0xc5cfb1c2482a)
-#define ZMK_SPLIT_BT_SERVICE_UUID ZMK_BT_SPLIT_UUID(0x00000000)
 
 /* -----------------------------------------------------------------------
  * Static UUIDs for discovery
@@ -49,15 +44,21 @@ static uint16_t thresh_write_handle;       /* ATT handle for write char */
 static uint16_t thresh_read_handle;        /* ATT handle for read/notify char value */
 static uint16_t adc_notify_handle;         /* ATT handle for ADC notify char value */
 
+/* CCC handles discovered via descriptor discovery (Bug 3 fix) */
+static uint16_t thresh_read_ccc_handle;
+static uint16_t adc_notify_ccc_handle;
+
 static struct bt_gatt_discover_params discover_params;
 static struct bt_gatt_subscribe_params thresh_read_sub;
 static struct bt_gatt_subscribe_params adc_notify_sub;
 
-/* Response slot (protected by single-threaded workqueue assumption) */
+/* Response synchronization (Bug 4 fix) */
+static K_MUTEX_DEFINE(ble_resp_mutex);
+static K_SEM_DEFINE(ble_resp_sem, 0, 1);
+static uint8_t ble_pending_cmd_id;
 #define RESPONSE_BUF_SIZE 256
-static uint8_t response_buf[RESPONSE_BUF_SIZE];
-static uint16_t response_len;
-static volatile bool response_ready;
+static uint8_t ble_response_buf[RESPONSE_BUF_SIZE];
+static uint16_t ble_response_len;
 
 /* ADC callback */
 static heball_ble_adc_cb_t adc_callback;
@@ -65,9 +66,10 @@ static heball_ble_adc_cb_t adc_callback;
 /* Discovery phase tracking */
 typedef enum {
     DISC_IDLE,
-    DISC_ZMK_SERVICE,     /* checking for ZMK split service */
     DISC_HEBALL_SERVICE,  /* searching for our custom service */
     DISC_CHARACTERISTICS, /* enumerating characteristics */
+    DISC_DESC_THRESH,     /* descriptor discovery for thresh-read CCC */
+    DISC_DESC_ADC,        /* descriptor discovery for ADC CCC */
     DISC_SUBSCRIBE_THRESH,
     DISC_SUBSCRIBE_ADC,
     DISC_COMPLETE,
@@ -75,8 +77,24 @@ typedef enum {
 
 static disc_phase_t disc_phase = DISC_IDLE;
 
+/* Discovery retry for -EBUSY (Bug 2 fix) */
+#define MAX_DISCOVERY_RETRIES 5
+#define DISCOVERY_RETRY_DELAY_MS 200
+static uint8_t discovery_retry_count;
+
 /* Delayed work for starting discovery after connection settles */
 static struct k_work_delayable discovery_start_work;
+
+static uint16_t svc_start_handle;
+static uint16_t svc_end_handle;
+
+/* Forward declarations */
+static void start_heball_service_discovery(void);
+static void start_characteristic_discovery(uint16_t start_handle, uint16_t end_handle);
+static void start_desc_discovery_thresh(void);
+static void start_desc_discovery_adc(void);
+static void subscribe_thresh_read(void);
+static void subscribe_adc_notify(void);
 
 /* -----------------------------------------------------------------------
  * Public API
@@ -86,36 +104,46 @@ bool heball_ble_central_is_connected(void)
     return split_conn != NULL && service_discovered;
 }
 
-int heball_ble_central_write_cmd(const uint8_t *data, uint16_t len)
+int heball_ble_central_send_and_wait(const uint8_t *cmd, uint16_t cmd_len,
+                                      uint8_t *resp, uint16_t resp_max,
+                                      int timeout_ms)
 {
     if (!split_conn || !service_discovered || thresh_write_handle == 0) {
         return -ENOTCONN;
     }
-
-    return bt_gatt_write_without_response(split_conn, thresh_write_handle,
-                                          data, len, false);
-}
-
-int heball_ble_central_get_response(uint8_t *out_buf, uint16_t max_len)
-{
-    if (!response_ready) {
-        return -EAGAIN;
+    if (cmd_len < 1) {
+        return -EINVAL;
     }
 
-    uint16_t copy_len = (response_len < max_len) ? response_len : max_len;
-    memcpy(out_buf, response_buf, copy_len);
-    response_ready = false;
+    k_mutex_lock(&ble_resp_mutex, K_FOREVER);
+    ble_pending_cmd_id = cmd[0];
+    k_sem_reset(&ble_resp_sem);
+    k_mutex_unlock(&ble_resp_mutex);
+
+    int err = bt_gatt_write_without_response(split_conn, thresh_write_handle,
+                                              cmd, cmd_len, false);
+    if (err) {
+        k_mutex_lock(&ble_resp_mutex, K_FOREVER);
+        ble_pending_cmd_id = 0;
+        k_mutex_unlock(&ble_resp_mutex);
+        return err;
+    }
+
+    err = k_sem_take(&ble_resp_sem, K_MSEC(timeout_ms));
+
+    k_mutex_lock(&ble_resp_mutex, K_FOREVER);
+    if (err) {
+        ble_pending_cmd_id = 0;
+        k_mutex_unlock(&ble_resp_mutex);
+        return -ETIMEDOUT;
+    }
+
+    uint16_t copy_len = (ble_response_len < resp_max) ? ble_response_len : resp_max;
+    memcpy(resp, ble_response_buf, copy_len);
+    ble_pending_cmd_id = 0;
+    k_mutex_unlock(&ble_resp_mutex);
+
     return (int)copy_len;
-}
-
-bool heball_ble_central_response_ready(void)
-{
-    return response_ready;
-}
-
-void heball_ble_central_clear_response(void)
-{
-    response_ready = false;
 }
 
 void heball_ble_central_set_adc_callback(heball_ble_adc_cb_t cb)
@@ -136,20 +164,24 @@ static uint8_t thresh_read_notify_cb(struct bt_conn *conn,
         return BT_GATT_ITER_STOP;
     }
 
-    LOG_DBG("Thresh-read notify: %u bytes", length);
+    const uint8_t *bytes = data;
 
-    if (length > 0 && length <= RESPONSE_BUF_SIZE) {
-        memcpy(response_buf, data, length);
-        response_len = length;
-        response_ready = true;
+    /* Bug 4 fix: match CMD_ID and signal semaphore under mutex */
+    k_mutex_lock(&ble_resp_mutex, K_FOREVER);
+    if (length > 0 && length <= RESPONSE_BUF_SIZE &&
+        ble_pending_cmd_id != 0 && bytes[0] == ble_pending_cmd_id) {
+        memcpy(ble_response_buf, data, length);
+        ble_response_len = length;
+        k_sem_give(&ble_resp_sem);
     }
+    k_mutex_unlock(&ble_resp_mutex);
 
     return BT_GATT_ITER_CONTINUE;
 }
 
 static uint8_t adc_notify_cb(struct bt_conn *conn,
-                              struct bt_gatt_subscribe_params *params,
-                              const void *data, uint16_t length)
+                               struct bt_gatt_subscribe_params *params,
+                               const void *data, uint16_t length)
 {
     if (!data) {
         LOG_INF("ADC notifications unsubscribed");
@@ -168,30 +200,18 @@ static uint8_t adc_notify_cb(struct bt_conn *conn,
  * GATT discovery state machine
  * ----------------------------------------------------------------------- */
 
-/* Forward declarations */
-static void start_heball_service_discovery(void);
-static void start_characteristic_discovery(uint16_t start_handle, uint16_t end_handle);
-static void subscribe_thresh_read(void);
-static void subscribe_adc_notify(void);
-
-static uint16_t svc_start_handle;
-static uint16_t svc_end_handle;
-
-/* ZMK split service discovery callback — just confirms the peer is valid */
-static uint8_t zmk_svc_discover_cb(struct bt_conn *conn,
-                                   const struct bt_gatt_attr *attr,
-                                   struct bt_gatt_discover_params *params)
+/* Helper for discovery errors with -EBUSY retry (Bug 2 fix) */
+static void handle_discovery_error(int err, const char *phase_name)
 {
-    if (!attr) {
-        LOG_INF("ZMK split service not found (expected on split peer) — "
-                "proceeding with HEBALL discovery anyway");
-        start_heball_service_discovery();
-        return BT_GATT_ITER_STOP;
+    if (err == -EBUSY && discovery_retry_count < MAX_DISCOVERY_RETRIES) {
+        discovery_retry_count++;
+        LOG_INF("%s: EBUSY, retry %u/%u", phase_name,
+                discovery_retry_count, MAX_DISCOVERY_RETRIES);
+        k_work_reschedule(&discovery_start_work, K_MSEC(DISCOVERY_RETRY_DELAY_MS));
+    } else {
+        LOG_ERR("%s failed (err %d)", phase_name, err);
+        disc_phase = DISC_IDLE;
     }
-
-    LOG_INF("ZMK split service found — confirmed split peer");
-    start_heball_service_discovery();
-    return BT_GATT_ITER_STOP;
 }
 
 /* HEBALL service discovery callback */
@@ -200,7 +220,7 @@ static uint8_t heball_svc_discover_cb(struct bt_conn *conn,
                                       struct bt_gatt_discover_params *params)
 {
     if (!attr) {
-        LOG_WRN("HEBALL custom service not found on peer");
+        LOG_WRN("HEBALL custom service not found on peer -- not our split half");
         disc_phase = DISC_IDLE;
         return BT_GATT_ITER_STOP;
     }
@@ -223,10 +243,11 @@ static uint8_t char_discover_cb(struct bt_conn *conn,
         LOG_INF("Characteristic discovery complete: write=%u read=%u adc=%u",
                 thresh_write_handle, thresh_read_handle, adc_notify_handle);
 
+        /* Bug 3 fix: discover CCC descriptors instead of assuming handle+1 */
         if (thresh_read_handle != 0) {
-            subscribe_thresh_read();
+            start_desc_discovery_thresh();
         } else if (adc_notify_handle != 0) {
-            subscribe_adc_notify();
+            start_desc_discovery_adc();
         } else {
             disc_phase = DISC_COMPLETE;
             service_discovered = true;
@@ -251,27 +272,50 @@ static uint8_t char_discover_cb(struct bt_conn *conn,
     return BT_GATT_ITER_CONTINUE;
 }
 
-/* Start discovery for ZMK split service (peer validation) */
-static void start_zmk_discovery(struct bt_conn *conn)
+/* Descriptor discovery callback for finding CCC handles (Bug 3 fix) */
+static uint8_t desc_discover_cb(struct bt_conn *conn,
+                                const struct bt_gatt_attr *attr,
+                                struct bt_gatt_discover_params *params)
 {
-    static struct bt_uuid_128 zmk_split_uuid =
-        BT_UUID_INIT_128(ZMK_SPLIT_BT_SERVICE_UUID);
-
-    disc_phase = DISC_ZMK_SERVICE;
-    memset(&discover_params, 0, sizeof(discover_params));
-    discover_params.uuid = &zmk_split_uuid.uuid;
-    discover_params.func = zmk_svc_discover_cb;
-    discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
-    discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
-    discover_params.type = BT_GATT_DISCOVER_PRIMARY;
-
-    int err = bt_gatt_discover(conn, &discover_params);
-    if (err) {
-        LOG_ERR("ZMK service discovery failed (err %d)", err);
-        disc_phase = DISC_IDLE;
+    if (!attr) {
+        if (disc_phase == DISC_DESC_THRESH) {
+            if (thresh_read_ccc_handle == 0) {
+                LOG_WRN("CCC not found for thresh-read, falling back to handle+1");
+                thresh_read_ccc_handle = thresh_read_handle + 1;
+            }
+            if (adc_notify_handle != 0) {
+                start_desc_discovery_adc();
+            } else {
+                subscribe_thresh_read();
+            }
+        } else if (disc_phase == DISC_DESC_ADC) {
+            if (adc_notify_ccc_handle == 0) {
+                LOG_WRN("CCC not found for adc-notify, falling back to handle+1");
+                adc_notify_ccc_handle = adc_notify_handle + 1;
+            }
+            if (thresh_read_handle != 0) {
+                subscribe_thresh_read();
+            } else {
+                subscribe_adc_notify();
+            }
+        }
+        return BT_GATT_ITER_STOP;
     }
+
+    if (!bt_uuid_cmp(attr->uuid, BT_UUID_GATT_CCC)) {
+        if (disc_phase == DISC_DESC_THRESH) {
+            thresh_read_ccc_handle = attr->handle;
+            LOG_DBG("Found thresh-read CCC handle: %u", thresh_read_ccc_handle);
+        } else if (disc_phase == DISC_DESC_ADC) {
+            adc_notify_ccc_handle = attr->handle;
+            LOG_DBG("Found adc-notify CCC handle: %u", adc_notify_ccc_handle);
+        }
+    }
+
+    return BT_GATT_ITER_CONTINUE;
 }
 
+/* Bug 2 fix: discover HEBALL service directly (skip ZMK service check) */
 static void start_heball_service_discovery(void)
 {
     if (!split_conn) {
@@ -288,8 +332,7 @@ static void start_heball_service_discovery(void)
 
     int err = bt_gatt_discover(split_conn, &discover_params);
     if (err) {
-        LOG_ERR("HEBALL service discovery failed (err %d)", err);
-        disc_phase = DISC_IDLE;
+        handle_discovery_error(err, "HEBALL service discovery");
     }
 }
 
@@ -305,8 +348,42 @@ static void start_characteristic_discovery(uint16_t start_handle, uint16_t end_h
 
     int err = bt_gatt_discover(split_conn, &discover_params);
     if (err) {
-        LOG_ERR("Characteristic discovery failed (err %d)", err);
-        disc_phase = DISC_IDLE;
+        handle_discovery_error(err, "Characteristic discovery");
+    }
+}
+
+/* Bug 3 fix: descriptor discovery to find actual CCC handles */
+static void start_desc_discovery_thresh(void)
+{
+    disc_phase = DISC_DESC_THRESH;
+    memset(&discover_params, 0, sizeof(discover_params));
+    discover_params.uuid = NULL;
+    discover_params.func = desc_discover_cb;
+    discover_params.start_handle = thresh_read_handle + 1;
+    /* Search up to next char declaration or end of service */
+    discover_params.end_handle = (adc_notify_handle > 0)
+        ? (adc_notify_handle - 2) : svc_end_handle;
+    discover_params.type = BT_GATT_DISCOVER_DESCRIPTOR;
+
+    int err = bt_gatt_discover(split_conn, &discover_params);
+    if (err) {
+        handle_discovery_error(err, "Thresh-read descriptor discovery");
+    }
+}
+
+static void start_desc_discovery_adc(void)
+{
+    disc_phase = DISC_DESC_ADC;
+    memset(&discover_params, 0, sizeof(discover_params));
+    discover_params.uuid = NULL;
+    discover_params.func = desc_discover_cb;
+    discover_params.start_handle = adc_notify_handle + 1;
+    discover_params.end_handle = svc_end_handle;
+    discover_params.type = BT_GATT_DISCOVER_DESCRIPTOR;
+
+    int err = bt_gatt_discover(split_conn, &discover_params);
+    if (err) {
+        handle_discovery_error(err, "ADC descriptor discovery");
     }
 }
 
@@ -316,8 +393,7 @@ static void subscribe_thresh_read(void)
 
     thresh_read_sub.notify = thresh_read_notify_cb;
     thresh_read_sub.value_handle = thresh_read_handle;
-    /* CCCD handle is value_handle + 1 for standard GATT layout */
-    thresh_read_sub.ccc_handle = thresh_read_handle + 1;
+    thresh_read_sub.ccc_handle = thresh_read_ccc_handle;
     thresh_read_sub.end_handle = svc_end_handle;
     thresh_read_sub.value = BT_GATT_CCC_NOTIFY;
 
@@ -344,7 +420,7 @@ static void subscribe_adc_notify(void)
 
     adc_notify_sub.notify = adc_notify_cb;
     adc_notify_sub.value_handle = adc_notify_handle;
-    adc_notify_sub.ccc_handle = adc_notify_handle + 1;
+    adc_notify_sub.ccc_handle = adc_notify_ccc_handle;
     adc_notify_sub.end_handle = svc_end_handle;
     adc_notify_sub.value = BT_GATT_CCC_NOTIFY;
 
@@ -369,11 +445,11 @@ static void discovery_start_work_handler(struct k_work *work)
         return;
     }
     LOG_INF("Starting HEBALL GATT discovery on split peer");
-    start_zmk_discovery(split_conn);
+    start_heball_service_discovery();
 }
 
 /* -----------------------------------------------------------------------
- * Connection callbacks — detect left-half peer
+ * Connection callbacks -- detect left-half peer
  * ----------------------------------------------------------------------- */
 static void connected(struct bt_conn *conn, uint8_t err)
 {
@@ -381,8 +457,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
         return;
     }
 
-    /* Only act on connections where we are the central (initiator).
-     * On the right half (ZMK central), outgoing connections go to peripherals. */
+    /* Only act on connections where we are the central (initiator). */
     struct bt_conn_info info;
     if (bt_conn_get_info(conn, &info) < 0) {
         return;
@@ -393,7 +468,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
     LOG_INF("BLE central: peer connected, scheduling HEBALL discovery");
 
-    /* Store connection — we only support one split peer */
+    /* Store connection -- we only support one split peer */
     if (split_conn) {
         bt_conn_unref(split_conn);
     }
@@ -402,9 +477,12 @@ static void connected(struct bt_conn *conn, uint8_t err)
     thresh_write_handle = 0;
     thresh_read_handle = 0;
     adc_notify_handle = 0;
+    thresh_read_ccc_handle = 0;
+    adc_notify_ccc_handle = 0;
+    discovery_retry_count = 0;
 
-    /* Wait 2 s for ZMK split handshake to settle, then start our discovery */
-    k_work_reschedule(&discovery_start_work, K_SECONDS(2));
+    /* Bug 2 fix: 500ms delay (was 2s) to let ZMK split settle */
+    k_work_reschedule(&discovery_start_work, K_MSEC(500));
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -420,8 +498,15 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     thresh_write_handle = 0;
     thresh_read_handle = 0;
     adc_notify_handle = 0;
-    response_ready = false;
+    thresh_read_ccc_handle = 0;
+    adc_notify_ccc_handle = 0;
     disc_phase = DISC_IDLE;
+
+    /* Wake any blocked send_and_wait caller */
+    k_mutex_lock(&ble_resp_mutex, K_FOREVER);
+    ble_pending_cmd_id = 0;
+    k_sem_give(&ble_resp_sem);
+    k_mutex_unlock(&ble_resp_mutex);
 
     bt_conn_unref(split_conn);
     split_conn = NULL;

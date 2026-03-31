@@ -20,6 +20,7 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/init.h>
+#include <zephyr/sys/atomic.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(heball_ble_periph, CONFIG_ZMK_LOG_LEVEL);
@@ -36,8 +37,12 @@ static bool adc_streaming_active;
 static struct k_work_delayable adc_stream_work;
 #define ADC_STREAM_INTERVAL_MS 100  /* 10 Hz max */
 
-/* Forward declaration of the service for bt_gatt_notify */
-static struct bt_gatt_service heball_svc;
+/* Notification attribute pointers (resolved at init from static service) */
+static const struct bt_gatt_attr *thresh_read_attr;
+static const struct bt_gatt_attr *adc_notify_attr;
+
+/* Flow control for ADC notifications (Bug 6 fix) */
+static atomic_t adc_notify_in_flight = ATOMIC_INIT(0);
 
 /* -----------------------------------------------------------------------
  * Threshold Write callback — receives commands from central
@@ -286,9 +291,12 @@ int heball_ble_peripheral_send_response(const uint8_t *data, uint16_t len)
         return -ENOTCONN;
     }
 
-    /* Attribute index 4 = thresh_read value attribute (after svc + write char/val + read char) */
-    const struct bt_gatt_attr *attr = &heball_svc.attrs[4];
-    return bt_gatt_notify(current_conn, attr, data, len);
+    return bt_gatt_notify(current_conn, thresh_read_attr, data, len);
+}
+
+static void adc_notify_sent_cb(struct bt_conn *conn, void *user_data)
+{
+    atomic_set(&adc_notify_in_flight, 0);
 }
 
 int heball_ble_peripheral_send_adc(const uint8_t *data, uint16_t len)
@@ -297,9 +305,23 @@ int heball_ble_peripheral_send_adc(const uint8_t *data, uint16_t len)
         return -ENOTCONN;
     }
 
-    /* Attribute index 7 = adc_notify value attribute */
-    const struct bt_gatt_attr *attr = &heball_svc.attrs[7];
-    return bt_gatt_notify(current_conn, attr, data, len);
+    /* Flow control: skip if previous notification still in flight */
+    if (!atomic_cas(&adc_notify_in_flight, 0, 1)) {
+        return -EBUSY;
+    }
+
+    struct bt_gatt_notify_params params = {
+        .attr = adc_notify_attr,
+        .data = data,
+        .len = len,
+        .func = adc_notify_sent_cb,
+    };
+
+    int err = bt_gatt_notify_cb(current_conn, &params);
+    if (err) {
+        atomic_set(&adc_notify_in_flight, 0);
+    }
+    return err;
 }
 
 /* -----------------------------------------------------------------------
@@ -335,7 +357,10 @@ static void adc_stream_work_handler(struct k_work *work)
         buf[1 + k * 4 + 3] = dist;
     }
 
-    heball_ble_peripheral_send_adc(buf, 1 + num_keys * 4);
+    int err = heball_ble_peripheral_send_adc(buf, 1 + num_keys * 4);
+    if (err && err != -EBUSY && err != -ENOMEM && err != -ENOBUFS) {
+        LOG_WRN("ADC notify send failed (err %d)", err);
+    }
 
 reschedule:
     k_work_reschedule(&adc_stream_work, K_MSEC(ADC_STREAM_INTERVAL_MS));
@@ -362,6 +387,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         adc_streaming_active = false;
         k_work_cancel_delayable(&adc_stream_work);
     }
+    atomic_set(&adc_notify_in_flight, 0);
     thresh_read_notify_enabled = false;
     adc_notify_enabled = false;
 
@@ -382,6 +408,20 @@ BT_CONN_CB_DEFINE(heball_periph_conn_cb) = {
 static int heball_ble_peripheral_init(void)
 {
     k_work_init_delayable(&adc_stream_work, adc_stream_work_handler);
+
+    /*
+     * Resolve attribute pointers from the static service.
+     * BT_GATT_SERVICE_DEFINE layout:
+     *   [0] Primary Service
+     *   [1] Thresh Write char decl  [2] Thresh Write char value
+     *   [3] Thresh Read char decl   [4] Thresh Read char value
+     *   [5] Thresh Read CCC
+     *   [6] ADC Notify char decl    [7] ADC Notify char value
+     *   [8] ADC Notify CCC
+     */
+    thresh_read_attr = &heball_svc.attrs[4];
+    adc_notify_attr = &heball_svc.attrs[7];
+
     LOG_INF("HEball BLE peripheral service registered");
     return 0;
 }

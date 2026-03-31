@@ -13,28 +13,19 @@
 bool heball_ble_central_is_connected(void);
 
 /**
- * Write a command to the left half via BLE.
- * The payload is the raw command body: [CMD_ID][payload...] (no framing).
- * @return 0 on success, negative errno on failure
+ * Send a command to the left half and wait for a matching response.
+ * Blocks the calling thread for up to @p timeout_ms milliseconds.
+ * Must NOT be called from the system workqueue -- use a dedicated thread.
+ * @param cmd        raw command bytes [CMD_ID][payload...]
+ * @param cmd_len    length of cmd
+ * @param resp       buffer for response
+ * @param resp_max   max bytes to copy into resp
+ * @param timeout_ms timeout in milliseconds
+ * @return number of response bytes copied, or negative errno
  */
-int heball_ble_central_write_cmd(const uint8_t *data, uint16_t len);
-
-/**
- * Retrieve the last response received from the left half.
- * Copies up to @p max_len bytes into @p out_buf.
- * @return number of bytes copied, or -EAGAIN if no response pending
- */
-int heball_ble_central_get_response(uint8_t *out_buf, uint16_t max_len);
-
-/**
- * Check if a response from the left half is available.
- */
-bool heball_ble_central_response_ready(void);
-
-/**
- * Clear the pending response slot.
- */
-void heball_ble_central_clear_response(void);
+int heball_ble_central_send_and_wait(const uint8_t *cmd, uint16_t cmd_len,
+                                      uint8_t *resp, uint16_t resp_max,
+                                      int timeout_ms);
 
 /**
  * Register a callback for ADC streaming data received from the left half.
