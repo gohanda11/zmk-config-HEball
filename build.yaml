@@ -7,7 +7,7 @@ include:
     artifact-name: heball-left-serial
   - board: seeeduino_xiao_ble
     shield: heball_right rgbled_adapter
-    snippet: heball-serial-right
+    snippet: heball-serial-right heball-studio-ble
     artifact-name: heball-right-serial
   - board: seeeduino_xiao_ble
     shield: settings_reset

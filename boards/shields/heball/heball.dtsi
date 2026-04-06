@@ -1,10 +1,76 @@
 #include <dt-bindings/zmk/matrix_transform.h>
+#include <physical_layouts.dtsi>
 
 / {
     chosen {
         zmk,kscan = &kscan_composite;
         zmk,matrix-transform = &default_transform;
         zmk,battery = &non_lipo_battery;
+        zmk,physical-layout = &physical_layout0;
+    };
+
+    physical_layout0: physical_layout_0 {
+        compatible = "zmk,physical-layout";
+        display-name = "default_layout";
+
+        kscan = <&kscan_composite>;
+        transform = <&default_transform>;
+
+        keys  //                          w   h     x     y      rot    rx     ry
+            = <&key_physical_attrs 100 100     0    25       0     0     0>   /* 0  ESC      */
+            , <&key_physical_attrs 100 100   100    25       0     0     0>   /* 1  Q        */
+            , <&key_physical_attrs 100 100   200    13       0     0     0>   /* 2  W        */
+            , <&key_physical_attrs 100 100   300     0       0     0     0>   /* 3  E        */
+            , <&key_physical_attrs 100 100   400    13       0     0     0>   /* 4  R        */
+            , <&key_physical_attrs 100 100   500    25       0     0     0>   /* 5  T        */
+            , <&key_physical_attrs 100 100     0   125       0     0     0>   /* 6  LCTL     */
+            , <&key_physical_attrs 100 100   100   125       0     0     0>   /* 7  A        */
+            , <&key_physical_attrs 100 100   200   113       0     0     0>   /* 8  S        */
+            , <&key_physical_attrs 100 100   300   100       0     0     0>   /* 9  D        */
+            , <&key_physical_attrs 100 100   400   113       0     0     0>   /* 10 F        */
+            , <&key_physical_attrs 100 100   500   125       0     0     0>   /* 11 G        */
+            , <&key_physical_attrs 100 100   600   138       0     0     0>   /* 12 SEMI     */
+            , <&key_physical_attrs 100 100     0   225       0     0     0>   /* 13 LSFT     */
+            , <&key_physical_attrs 100 100   100   225       0     0     0>   /* 14 Z        */
+            , <&key_physical_attrs 100 100   200   213       0     0     0>   /* 15 X        */
+            , <&key_physical_attrs 100 100   300   200       0     0     0>   /* 16 C        */
+            , <&key_physical_attrs 100 100   400   213       0     0     0>   /* 17 V        */
+            , <&key_physical_attrs 100 100   500   225       0     0     0>   /* 18 B        */
+            , <&key_physical_attrs 100 100   600   238       0     0     0>   /* 19 LBKT     */
+            , <&key_physical_attrs 100 100     0   325       0     0     0>   /* 20 CAPS     */
+            , <&key_physical_attrs 100 100   100   325       0     0     0>   /* 21 LGUI     */
+            , <&key_physical_attrs 100 100   200   313       0     0     0>   /* 22 LALT     */
+            , <&key_physical_attrs 100 100   300   300       0     0     0>   /* 23 BSPC     */
+            , <&key_physical_attrs 100 100   450   350       0     0     0>   /* 24 DEL      */
+            , <&key_physical_attrs 100 100   550   350    1000   550   450>   /* 25 SPC      */
+            , <&key_physical_attrs 100 100   648   367    2000   648   467>   /* 26 LANG2    */
+            , <&key_physical_attrs 100 100   715   138       0     0     0>   /* 27 SW_L enc */
+            , <&key_physical_attrs 100 100  1050    25       0     0     0>   /* 28 Y        */
+            , <&key_physical_attrs 100 100  1150    13       0     0     0>   /* 29 U        */
+            , <&key_physical_attrs 100 100  1250     0       0     0     0>   /* 30 I        */
+            , <&key_physical_attrs 100 100  1350    13       0     0     0>   /* 31 O        */
+            , <&key_physical_attrs 100 100  1450    25       0     0     0>   /* 32 P        */
+            , <&key_physical_attrs 100 100  1550    25       0     0     0>   /* 33 BSPC     */
+            , <&key_physical_attrs 100 100   950   138       0     0     0>   /* 34 SQT      */
+            , <&key_physical_attrs 100 100  1050   125       0     0     0>   /* 35 H        */
+            , <&key_physical_attrs 100 100  1150   113       0     0     0>   /* 36 J        */
+            , <&key_physical_attrs 100 100  1250   100       0     0     0>   /* 37 K        */
+            , <&key_physical_attrs 100 100  1350   113       0     0     0>   /* 38 L        */
+            , <&key_physical_attrs 100 100  1450   125       0     0     0>   /* 39 MINS     */
+            , <&key_physical_attrs 100 100  1550   125       0     0     0>   /* 40 EQL      */
+            , <&key_physical_attrs 100 100   950   238       0     0     0>   /* 41 RBKT     */
+            , <&key_physical_attrs 100 100  1050   225       0     0     0>   /* 42 N        */
+            , <&key_physical_attrs 100 100  1150   213       0     0     0>   /* 43 M        */
+            , <&key_physical_attrs 100 100  1250   200       0     0     0>   /* 44 COMMA    */
+            , <&key_physical_attrs 100 100  1350   213       0     0     0>   /* 45 DOT      */
+            , <&key_physical_attrs 100 100  1450   225       0     0     0>   /* 46 SLASH    */
+            , <&key_physical_attrs 100 100  1550   225       0     0     0>   /* 47 RSFT     */
+            , <&key_physical_attrs 100 100   902   367   34000  1002   467>   /* 48 LANG1    */
+            , <&key_physical_attrs 100 100  1000   350   35000  1100   450>   /* 49 ENTER    */
+            , <&key_physical_attrs 100 100  1450   325       0     0     0>   /* 50 SEMI     */
+            , <&key_physical_attrs 100 100  1550   325       0     0     0>   /* 51 SQT      */
+            , <&key_physical_attrs 100 100   835   138       0     0     0>   /* 52 SW_R enc */
+            ;
     };
 
     default_transform: keymap_transform_0 {

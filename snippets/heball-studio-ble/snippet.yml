@@ -1,0 +1,3 @@
+name: heball-studio-ble
+append:
+  DTS_EXTRA_CPPFLAGS: -DZMK_BEHAVIORS_KEEP_ALL

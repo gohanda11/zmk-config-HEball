@@ -1,6 +1,8 @@
 #include "heball.dtsi"
 #include <input/processors.dtsi>
 #include <dt-bindings/zmk/input_transform.h>
+#include <input/processors/runtime-input-processor.dtsi>
+#include <behaviors/battery_history_request.dtsi>
 
 /* Right side col-offset: local col 0-24 → global col 28-52 */
 &default_transform {
@@ -249,11 +251,13 @@
     status = "okay";
     device = <&trackball>;
     input-processors = <&zip_xy_transform INPUT_TRANSFORM_Y_INVERT>,
+                       <&mouse_runtime_input_processor>,
                        <&zip_temp_layer 1 500>;
 
     scroller {
         layers = <5>;
         input-processors = <&zip_xy_to_scroll_mapper>,
+                           <&scroll_runtime_input_processor>,
                            <&zip_scroll_scaler 1 5>;
     };
 };

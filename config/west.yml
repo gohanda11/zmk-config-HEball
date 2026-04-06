@@ -8,10 +8,12 @@ manifest:
       url-base: https://github.com/gohanda11
     - name: badjeff
       url-base: https://github.com/badjeff
+    - name: cormoran
+      url-base: https://github.com/cormoran
   projects:
     - name: zmk
-      remote: zmkfirmware
-      revision: v0.3.0
+      remote: cormoran
+      revision: v0.3-branch+dya
       import: app/west.yml
     - name: zmk-driver-kscan-he
       remote: gohanda11
@@ -24,6 +26,19 @@ manifest:
       revision: main
     - name: zmk-rgbled-widget
       remote: gohanda11
+      revision: main
+    # Dya Studio 連携モジュール (cormoran)
+    - name: zmk-module-ble-management
+      remote: cormoran
+      revision: main
+    - name: zmk-module-battery-history
+      remote: cormoran
+      revision: main
+    - name: zmk-module-settings-rpc
+      remote: cormoran
+      revision: main
+    - name: zmk-module-runtime-input-processor
+      remote: cormoran
       revision: main
   self:
     path: config
