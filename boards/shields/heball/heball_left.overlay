@@ -62,6 +62,7 @@
     kscan_he: kscan_he {
         compatible = "zmk,kscan-adc-mux";
         status = "okay";
+        wakeup-source;
 
         /* SC4823 sleep/wakeup control */
         sleep-gpios = <&gpio1 12 GPIO_ACTIVE_HIGH>;   /* P1.12 → HE_SLEEP */
