@@ -228,7 +228,7 @@
         evt-type = <2>;      /* INPUT_EV_REL */
         x-input-code = <0>;  /* INPUT_REL_X */
         y-input-code = <1>;  /* INPUT_REL_Y */
-        cpi = <400>;
+        cpi = <800>;
         force-awake;
         wakeup-source;
     };
@@ -258,6 +258,6 @@
         layers = <5>;
         input-processors = <&zip_xy_to_scroll_mapper>,
                            <&scroll_runtime_input_processor>,
-                           <&zip_scroll_scaler 1 5>;
+                           <&zip_scroll_scaler 2 5>;
     };
 };
