@@ -37,6 +37,12 @@
             bindings = <&kp EQUAL>;
             key-positions = <17 18>;
         };
+
+        /* デバッグ用スリープコンボ: CAPSLOCK+WIN+ALT (左手bot 20+21+22) */
+        soft_off_combo {
+            bindings = <&soft_off>;
+            key-positions = <20 21 22>;
+        };
     };
 
     macros {
