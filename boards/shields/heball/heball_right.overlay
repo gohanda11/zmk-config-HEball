@@ -140,6 +140,7 @@
     /* Composite kscan: HE keys (col 0-23) + SW_R push button (col 24) */
     kscan_composite: kscan_composite {
         compatible = "zmk,kscan-composite";
+        wakeup-source;
         rows = <1>;
         columns = <25>;
 
